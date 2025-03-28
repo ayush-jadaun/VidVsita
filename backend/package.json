@@ -1,0 +1,26 @@
+{
+  "name": "vidvista",
+  "version": "1.0.0",
+  "description": "It is a video streaming platform with various AI capabilities to make the user experience wonderful.",
+  "license": "ISC",
+  "author": "ayush_jadaun",
+  "type": "module",
+  "main": "dist/server.js",
+"scripts": {
+  "build": "tsc",
+  "start": "node dist/server.js",
+  "dev": "nodemon --watch . --ext ts --exec node --loader ts-node/esm server.ts"
+},
+
+
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "nodemon": "^3.1.9"
+  }
+}

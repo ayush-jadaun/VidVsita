@@ -4,23 +4,28 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { Request, Response } from "express";
 import dotenv from "dotenv";
-
+import mongoose from "mongoose";
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
+interface AuthRequest extends Request {
+  user?: Document & {
+    _id: string;
+    name: string;
+    username: string;
+    refreshToken?: string;
+  };
+}
+
+const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET as string;
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET as string;
 
 export const registerUser = asyncHandler(
   async (req: Request, res: Response) => {
     const { name, username, password } = req.body;
 
-    if (!name) {
-      return res.status(400).json({ message: "Name is required" });
-    }
-    if (!username) {
-      return res.status(400).json({ message: "Username is required" });
-    }
-    if (!password) {
-      return res.status(400).json({ message: "Password is required" });
+
+    if (!name || !username || !password) {
+      return res.status(400).json({ message: "All fields are required" });
     }
 
     const passwordRegex =
@@ -33,44 +38,60 @@ export const registerUser = asyncHandler(
       });
     }
 
-    const existingUser = await User.findOne({ username });
+ 
+    const existingUser = await User.findOne({
+      username: username.toLowerCase(),
+    });
     if (existingUser) {
       return res.status(400).json({ message: "Username is already taken" });
     }
 
+   
     const hashedPassword = await bcrypt.hash(password, 12);
+
 
     const newUser = new User({
       name,
-      username,
+      username: username.toLowerCase(),
       password: hashedPassword,
     });
 
     await newUser.save();
 
-    const token = jwt.sign({ id: newUser._id, username }, JWT_SECRET, {
-      expiresIn: "7d",
-    });
+  
+    const accessToken = generateAccessToken(newUser._id);
+    const refreshToken = generateRefreshToken(newUser._id);
 
-    res.cookie("authToken", token, {
+ 
+    newUser.refreshToken = refreshToken;
+    await newUser.save();
+
+    // Set cookies
+    res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      maxAge: 15 * 60 * 1000, 
     });
 
-   res.status(201).json({
-     message: "User registered successfully",
-     token, // Include token in response
-     user: {
-       id: newUser._id,
-       name: newUser.name,
-       username: newUser.username,
-     },
-   });
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000, 
+    });
 
+    res.status(201).json({
+      message: "User registered successfully",
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        username: newUser.username,
+      },
+    });
   }
 );
+
 export const loginUser = asyncHandler(async (req: Request, res: Response) => {
   const { username, password } = req.body;
 
@@ -80,7 +101,7 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
       .json({ message: "Username and password are required" });
   }
 
-  const user = await User.findOne({ username });
+  const user = await User.findOne({ username: username.toLowerCase() });
   if (!user) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
@@ -90,40 +111,91 @@ export const loginUser = asyncHandler(async (req: Request, res: Response) => {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
-  const token = jwt.sign(
-    { id: user._id, username: user.username },
-    JWT_SECRET,
-    {
-      expiresIn: "7d",
-    }
-  );
 
-  res.cookie("authToken", token, {
+  const accessToken = generateAccessToken(user._id);
+  const refreshToken = generateRefreshToken(user._id);
+
+
+  user.refreshToken = refreshToken;
+  await user.save();
+
+  // Set cookies
+  res.cookie("accessToken", accessToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    maxAge: 15 * 60 * 1000, 
+  });
+
+  res.cookie("refreshToken", refreshToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 
- res.status(200).json({
-   message: "Login successful",
-   token,
-   user: {
-     id: user._id,
-     name: user.name,
-     username: user.username,
-   },
- });
-
+  res.status(200).json({
+    message: "Login successful",
+    user: {
+      id: user._id,
+      name: user.name,
+      username: user.username,
+    },
+  });
 });
 
-export const logoutUser = asyncHandler(async (req: Request, res: Response) => {
-  res.cookie("authToken", "", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
-    expires: new Date(0),
-  });
+export const logoutUser = asyncHandler(async (req: AuthRequest, res: Response) => {
+ 
+  if (req.user) {
+    await User.findByIdAndUpdate(req.user._id, { refreshToken: null });
+  }
+
+
+  res.clearCookie("accessToken");
+  res.clearCookie("refreshToken");
 
   res.status(200).json({ message: "Logged out successfully" });
 });
+
+export const refreshAccessToken = asyncHandler(
+  async (req: Request, res: Response) => {
+    const refreshToken = req.cookies.refreshToken;
+
+    if (!refreshToken) {
+      return res.status(401).json({ message: "Refresh token required" });
+    }
+
+    try {
+      const decoded = jwt.verify(refreshToken, REFRESH_TOKEN_SECRET) as {
+        id: string;
+      };
+      const user = await User.findById(decoded.id);
+
+      if (!user || user.refreshToken !== refreshToken) {
+        return res.status(403).json({ message: "Invalid refresh token" });
+      }
+
+
+      const newAccessToken = generateAccessToken(user._id);
+
+      res.cookie("accessToken", newAccessToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 15 * 60 * 1000, 
+      });
+
+      res.status(200).json({ message: "Access token refreshed" });
+    } catch (error) {
+      return res.status(403).json({ message: "Invalid refresh token" });
+    }
+  }
+);
+
+function generateAccessToken(userId: mongoose.Types.ObjectId | string) {
+  return jwt.sign({ id: userId.toString() }, ACCESS_TOKEN_SECRET, { expiresIn: "15m" });
+}
+
+function generateRefreshToken(userId: mongoose.Types.ObjectId | string) {
+  return jwt.sign({ id: userId.toString() }, REFRESH_TOKEN_SECRET, { expiresIn: "7d" });
+}
